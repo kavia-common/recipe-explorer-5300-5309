@@ -146,12 +146,46 @@ export async function createRecipe({ title, category_id, description = null, ima
   }
 
   try {
-    // 1) Insert into recipes
-    const { data: recipeRow, error: recipeError } = await supabase
+    // Ensure we have an authenticated session so RLS "to authenticated" applies
+    const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+    if (sessionError) {
+      return { data: null, error: sessionError };
+    }
+    const user = sessionData?.session?.user || null;
+    if (!user) {
+      return { data: null, error: new Error('You must be signed in to create a recipe.') };
+    }
+
+    // Build insert payload; include user_id when present in schema/policy
+    const baseRecipe = { title, description, image_url, category_id };
+
+    // Attempt insert including user_id first, to satisfy stricter policies like "user_id = auth.uid()"
+    let recipeRow = null;
+    let recipeError = null;
+
+    // First try with user_id
+    const { data: withUser, error: withUserErr } = await supabase
       .from('recipes')
-      .insert([{ title, description, image_url, category_id }])
+      .insert([{ ...baseRecipe, user_id: user.id }])
       .select('id')
       .single();
+
+    if (withUserErr) {
+      // If column doesn't exist (Postgres undefined column code 42703) or error mentions user_id, retry without it
+      if (withUserErr?.code === '42703' || String(withUserErr?.message || '').toLowerCase().includes('user_id')) {
+        const { data: withoutUser, error: withoutUserErr } = await supabase
+          .from('recipes')
+          .insert([baseRecipe])
+          .select('id')
+          .single();
+        recipeRow = withoutUser;
+        recipeError = withoutUserErr;
+      } else {
+        recipeError = withUserErr;
+      }
+    } else {
+      recipeRow = withUser;
+    }
 
     if (recipeError) throw recipeError;
     const recipeId = recipeRow?.id;

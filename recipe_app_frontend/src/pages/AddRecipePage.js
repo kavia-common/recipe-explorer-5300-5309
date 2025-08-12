@@ -2,12 +2,17 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { fetchCategories, createRecipe } from '../services/api';
 import { supabase } from '../services/supabaseClient';
+import { signInWithOAuth, signInWithMagicLink } from '../utils/auth';
 
 /**
  * Page component to add a new recipe.
  * Includes fields for title, category, description, optional image URL,
  * structured ingredient rows (name, amount), and step rows (instruction).
  * Submits data to Supabase to create records in recipes, recipe_ingredients, and recipe_steps.
+ *
+ * Authentication:
+ * - Requires an authenticated Supabase session to insert due to RLS policies.
+ * - If not authenticated, presents sign-in options (OAuth and Magic Link).
  */
 // PUBLIC_INTERFACE
 export default function AddRecipePage() {
@@ -28,10 +33,14 @@ export default function AddRecipePage() {
   const [message, setMessage] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
 
+  const [session, setSession] = useState(null);
+  const [authEmail, setAuthEmail] = useState('');
+
   const supabaseConnected = useMemo(() => Boolean(supabase), []);
 
   useEffect(() => {
     let mounted = true;
+
     (async () => {
       setLoadingCats(true);
       const cats = await fetchCategories();
@@ -40,7 +49,28 @@ export default function AddRecipePage() {
         setLoadingCats(false);
       }
     })();
-    return () => { mounted = false; };
+
+    // Track auth session for gating inserts
+    (async () => {
+      if (!supabase) return;
+      const { data } = await supabase.auth.getSession();
+      if (mounted) setSession(data?.session || null);
+      const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+        if (mounted) setSession(newSession);
+      });
+      // Cleanup subscription
+      return () => {
+        try {
+          listener?.subscription?.unsubscribe?.();
+        } catch (_e) {
+          // no-op
+        }
+      };
+    })();
+
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   const addIngredientRow = () => {
@@ -90,6 +120,12 @@ export default function AddRecipePage() {
       return;
     }
 
+    // Guard: ensure authenticated session for RLS insert
+    if (!session?.user) {
+      setErrorMsg('You must be signed in to add a recipe.');
+      return;
+    }
+
     if (!validate()) return;
 
     setSaving(true);
@@ -125,6 +161,30 @@ export default function AddRecipePage() {
     }
   };
 
+  const handleOAuth = async (provider) => {
+    setErrorMsg('');
+    const { error } = await signInWithOAuth(provider);
+    if (error) setErrorMsg(error.message || 'Failed to start OAuth sign in.');
+  };
+
+  const handleMagicLink = async (e) => {
+    e.preventDefault();
+    setErrorMsg('');
+    if (!authEmail.trim()) {
+      setErrorMsg('Please enter your email address.');
+      return;
+    }
+    const { error } = await signInWithMagicLink(authEmail.trim());
+    if (error) setErrorMsg(error.message || 'Failed to send magic link.');
+    else setMessage('Check your email for a sign-in link.');
+  };
+
+  const handleSignOut = async () => {
+    setErrorMsg('');
+    setMessage('');
+    await supabase?.auth?.signOut?.();
+  };
+
   return (
     <section aria-label="Add new recipe" style={{ maxWidth: 1000, margin: '0 auto' }}>
       <header style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.5rem' }}>
@@ -138,18 +198,30 @@ export default function AddRecipePage() {
         </div>
       ) : null}
 
-      <form onSubmit={onSubmit} className="panel" style={{ display: 'grid', gap: '1rem' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 280px', gap: '1rem' }}>
-          <div>
-            <label htmlFor="title"><strong>Title</strong></label>
+      {supabaseConnected && !session?.user ? (
+        <div className="panel" style={{ display: 'grid', gap: '0.75rem' }}>
+          <h3 style={{ margin: 0 }}>Sign in to add recipes</h3>
+          <p className="supabase-status" style={{ marginTop: 0 }}>
+            You need an account to create content. Choose a sign-in method below.
+          </p>
+
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <button type="button" className="btn" onClick={() => handleOAuth('github')} aria-label="Sign in with GitHub">
+              Continue with GitHub
+            </button>
+            <button type="button" className="btn" onClick={() => handleOAuth('google')} aria-label="Sign in with Google">
+              Continue with Google
+            </button>
+          </div>
+
+          <form onSubmit={handleMagicLink} style={{ display: 'grid', gridTemplateColumns: '1fr 160px', gap: '0.5rem', alignItems: 'center' }}>
             <input
-              id="title"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="e.g., Spaghetti Carbonara"
-              required
+              type="email"
+              value={authEmail}
+              onChange={(e) => setAuthEmail(e.target.value)}
+              placeholder="you@example.com"
+              aria-label="Email address for magic link"
               style={{
-                marginTop: 6,
                 width: '100%',
                 background: 'var(--bg-soft)',
                 border: '1px solid var(--border)',
@@ -158,191 +230,238 @@ export default function AddRecipePage() {
                 padding: '0.55rem 0.75rem',
               }}
             />
-          </div>
+            <button type="submit" className="btn">Send magic link</button>
+          </form>
 
-          <div>
-            <label htmlFor="category"><strong>Category</strong></label>
-            <select
-              id="category"
-              value={categoryId}
-              onChange={(e) => setCategoryId(e.target.value)}
-              required
-              style={{
-                marginTop: 6,
-                width: '100%',
-                background: 'var(--bg-soft)',
-                border: '1px solid var(--border)',
-                color: 'var(--text)',
-                borderRadius: 10,
-                padding: '0.55rem 0.75rem',
-              }}
-            >
-              <option value="" disabled>{loadingCats ? 'Loading...' : 'Select a category'}</option>
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        <div>
-          <label htmlFor="description"><strong>Description</strong> <span className="supabase-status">(optional)</span></label>
-          <textarea
-            id="description"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            rows={3}
-            placeholder="Short description of the recipe..."
-            style={{
-              marginTop: 6,
-              width: '100%',
-              background: 'var(--bg-soft)',
-              border: '1px solid var(--border)',
-              color: 'var(--text)',
-              borderRadius: 10,
-              padding: '0.55rem 0.75rem',
-            }}
-          />
-        </div>
-
-        <div>
-          <label htmlFor="imageUrl"><strong>Image URL</strong> <span className="supabase-status">(optional)</span></label>
-          <input
-            id="imageUrl"
-            value={imageUrl}
-            onChange={(e) => setImageUrl(e.target.value)}
-            placeholder="https://example.com/image.jpg"
-            style={{
-              marginTop: 6,
-              width: '100%',
-              background: 'var(--bg-soft)',
-              border: '1px solid var(--border)',
-              color: 'var(--text)',
-              borderRadius: 10,
-              padding: '0.55rem 0.75rem',
-            }}
-          />
-        </div>
-
-        <div>
-          <h3 style={{ marginTop: 0 }}>Ingredients</h3>
-          <div role="table" aria-label="Ingredients table" style={{ border: '1px solid var(--border)', borderRadius: 12, overflow: 'hidden' }}>
-            <div role="row" style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 86px', gap: 0, background: 'var(--bg-soft)', padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border)', fontWeight: 600 }}>
-              <div role="columnheader">Name</div>
-              <div role="columnheader">Amount</div>
-              <div role="columnheader">Action</div>
+          {errorMsg ? (
+            <div className="supabase-status" role="alert" style={{ color: '#b91c1c' }}>
+              {errorMsg}
             </div>
-            {ingredients.map((row, idx) => (
-              <div role="row" key={`ing-${idx}`} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 86px', gap: 0, padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border)' }}>
-                <div role="cell" style={{ paddingRight: 8 }}>
-                  <input
-                    aria-label={`Ingredient ${idx + 1} name`}
-                    value={row.name}
-                    onChange={(e) => updateIngredient(idx, 'name', e.target.value)}
-                    placeholder="e.g., All-purpose flour"
-                    style={{
-                      width: '100%',
-                      background: 'var(--bg-soft)',
-                      border: '1px solid var(--border)',
-                      color: 'var(--text)',
-                      borderRadius: 8,
-                      padding: '0.45rem 0.6rem',
-                    }}
-                  />
-                </div>
-                <div role="cell" style={{ paddingRight: 8 }}>
-                  <input
-                    aria-label={`Ingredient ${idx + 1} amount`}
-                    value={row.amount}
-                    onChange={(e) => updateIngredient(idx, 'amount', e.target.value)}
-                    placeholder="e.g., 1 1/2 cups"
-                    style={{
-                      width: '100%',
-                      background: 'var(--bg-soft)',
-                      border: '1px solid var(--border)',
-                      color: 'var(--text)',
-                      borderRadius: 8,
-                      padding: '0.45rem 0.6rem',
-                    }}
-                  />
-                </div>
-                <div role="cell" style={{ display: 'flex', alignItems: 'center' }}>
-                  <button type="button" className="btn" onClick={() => removeIngredientRow(idx)} disabled={ingredients.length === 1}>
-                    Remove
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-          <div style={{ marginTop: '0.5rem' }}>
-            <button type="button" className="btn" onClick={addIngredientRow}>＋ Add ingredient</button>
-          </div>
-        </div>
-
-        <div>
-          <h3 style={{ marginTop: 0 }}>Steps</h3>
-          <div role="table" aria-label="Steps table" style={{ border: '1px solid var(--border)', borderRadius: 12, overflow: 'hidden' }}>
-            <div role="row" style={{ display: 'grid', gridTemplateColumns: '70px 1fr 86px', gap: 0, background: 'var(--bg-soft)', padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border)', fontWeight: 600 }}>
-              <div role="columnheader">Step</div>
-              <div role="columnheader">Instruction</div>
-              <div role="columnheader">Action</div>
+          ) : null}
+          {message ? (
+            <div className="supabase-status" role="status" style={{ color: '#065f46' }}>
+              {message}
             </div>
-            {steps.map((row, idx) => (
-              <div role="row" key={`step-${idx}`} style={{ display: 'grid', gridTemplateColumns: '70px 1fr 86px', gap: 0, padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border)' }}>
-                <div role="cell" style={{ display: 'flex', alignItems: 'center', color: 'var(--text-muted)' }}>
-                  {idx + 1}
-                </div>
-                <div role="cell" style={{ paddingRight: 8 }}>
-                  <textarea
-                    aria-label={`Step ${idx + 1} instruction`}
-                    value={row.instruction}
-                    onChange={(e) => updateStep(idx, e.target.value)}
-                    rows={2}
-                    placeholder="Describe this step..."
-                    style={{
-                      width: '100%',
-                      background: 'var(--bg-soft)',
-                      border: '1px solid var(--border)',
-                      color: 'var(--text)',
-                      borderRadius: 8,
-                      padding: '0.45rem 0.6rem',
-                      resize: 'vertical',
-                    }}
-                  />
-                </div>
-                <div role="cell" style={{ display: 'flex', alignItems: 'center' }}>
-                  <button type="button" className="btn" onClick={() => removeStepRow(idx)} disabled={steps.length === 1}>
-                    Remove
-                  </button>
-                </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {supabaseConnected && session?.user ? (
+        <>
+          <div className="panel" style={{ marginBottom: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span className="supabase-status">
+              Signed in as {session.user.email || session.user.id}
+            </span>
+            <button type="button" className="btn secondary" onClick={handleSignOut}>Sign out</button>
+          </div>
+
+          <form onSubmit={onSubmit} className="panel" style={{ display: 'grid', gap: '1rem' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 280px', gap: '1rem' }}>
+              <div>
+                <label htmlFor="title"><strong>Title</strong></label>
+                <input
+                  id="title"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="e.g., Spaghetti Carbonara"
+                  required
+                  style={{
+                    marginTop: 6,
+                    width: '100%',
+                    background: 'var(--bg-soft)',
+                    border: '1px solid var(--border)',
+                    color: 'var(--text)',
+                    borderRadius: 10,
+                    padding: '0.55rem 0.75rem',
+                  }}
+                />
               </div>
-            ))}
-          </div>
-          <div style={{ marginTop: '0.5rem' }}>
-            <button type="button" className="btn" onClick={addStepRow}>＋ Add step</button>
-          </div>
-        </div>
 
-        {errorMsg ? (
-          <div className="supabase-status" role="alert" style={{ color: '#b91c1c' }}>
-            {errorMsg}
-          </div>
-        ) : null}
-        {message ? (
-          <div className="supabase-status" role="status" style={{ color: '#065f46' }}>
-            {message}
-          </div>
-        ) : null}
+              <div>
+                <label htmlFor="category"><strong>Category</strong></label>
+                <select
+                  id="category"
+                  value={categoryId}
+                  onChange={(e) => setCategoryId(e.target.value)}
+                  required
+                  style={{
+                    marginTop: 6,
+                    width: '100%',
+                    background: 'var(--bg-soft)',
+                    border: '1px solid var(--border)',
+                    color: 'var(--text)',
+                    borderRadius: 10,
+                    padding: '0.55rem 0.75rem',
+                  }}
+                >
+                  <option value="" disabled>{loadingCats ? 'Loading...' : 'Select a category'}</option>
+                  {categories.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
 
-        <div style={{ display: 'flex', gap: '0.75rem' }}>
-          <button type="submit" className="btn" disabled={saving}>
-            {saving ? 'Saving…' : 'Save Recipe'}
-          </button>
-          <Link to="/" className="btn secondary" aria-label="Cancel and go back" style={{ display: 'inline-flex', alignItems: 'center', textDecoration: 'none' }}>
-            Cancel
-          </Link>
-        </div>
-      </form>
+            <div>
+              <label htmlFor="description"><strong>Description</strong> <span className="supabase-status">(optional)</span></label>
+              <textarea
+                id="description"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                rows={3}
+                placeholder="Short description of the recipe..."
+                style={{
+                  marginTop: 6,
+                  width: '100%',
+                  background: 'var(--bg-soft)',
+                  border: '1px solid var(--border)',
+                  color: 'var(--text)',
+                  borderRadius: 10,
+                  padding: '0.55rem 0.75rem',
+                }}
+              />
+            </div>
+
+            <div>
+              <label htmlFor="imageUrl"><strong>Image URL</strong> <span className="supabase-status">(optional)</span></label>
+              <input
+                id="imageUrl"
+                value={imageUrl}
+                onChange={(e) => setImageUrl(e.target.value)}
+                placeholder="https://example.com/image.jpg"
+                style={{
+                  marginTop: 6,
+                  width: '100%',
+                  background: 'var(--bg-soft)',
+                  border: '1px solid var(--border)',
+                  color: 'var(--text)',
+                  borderRadius: 10,
+                  padding: '0.55rem 0.75rem',
+                }}
+              />
+            </div>
+
+            <div>
+              <h3 style={{ marginTop: 0 }}>Ingredients</h3>
+              <div role="table" aria-label="Ingredients table" style={{ border: '1px solid var(--border)', borderRadius: 12, overflow: 'hidden' }}>
+                <div role="row" style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 86px', gap: 0, background: 'var(--bg-soft)', padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border)', fontWeight: 600 }}>
+                  <div role="columnheader">Name</div>
+                  <div role="columnheader">Amount</div>
+                  <div role="columnheader">Action</div>
+                </div>
+                {ingredients.map((row, idx) => (
+                  <div role="row" key={`ing-${idx}`} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 86px', gap: 0, padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border)' }}>
+                    <div role="cell" style={{ paddingRight: 8 }}>
+                      <input
+                        aria-label={`Ingredient ${idx + 1} name`}
+                        value={row.name}
+                        onChange={(e) => updateIngredient(idx, 'name', e.target.value)}
+                        placeholder="e.g., All-purpose flour"
+                        style={{
+                          width: '100%',
+                          background: 'var(--bg-soft)',
+                          border: '1px solid var(--border)',
+                          color: 'var(--text)',
+                          borderRadius: 8,
+                          padding: '0.45rem 0.6rem',
+                        }}
+                      />
+                    </div>
+                    <div role="cell" style={{ paddingRight: 8 }}>
+                      <input
+                        aria-label={`Ingredient ${idx + 1} amount`}
+                        value={row.amount}
+                        onChange={(e) => updateIngredient(idx, 'amount', e.target.value)}
+                        placeholder="e.g., 1 1/2 cups"
+                        style={{
+                          width: '100%',
+                          background: 'var(--bg-soft)',
+                          border: '1px solid var(--border)',
+                          color: 'var(--text)',
+                          borderRadius: 8,
+                          padding: '0.45rem 0.6rem',
+                        }}
+                      />
+                    </div>
+                    <div role="cell" style={{ display: 'flex', alignItems: 'center' }}>
+                      <button type="button" className="btn" onClick={() => removeIngredientRow(idx)} disabled={ingredients.length === 1}>
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop: '0.5rem' }}>
+                <button type="button" className="btn" onClick={addIngredientRow}>＋ Add ingredient</button>
+              </div>
+            </div>
+
+            <div>
+              <h3 style={{ marginTop: 0 }}>Steps</h3>
+              <div role="table" aria-label="Steps table" style={{ border: '1px solid var(--border)', borderRadius: 12, overflow: 'hidden' }}>
+                <div role="row" style={{ display: 'grid', gridTemplateColumns: '70px 1fr 86px', gap: 0, background: 'var(--bg-soft)', padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border)', fontWeight: 600 }}>
+                  <div role="columnheader">Step</div>
+                  <div role="columnheader">Instruction</div>
+                  <div role="columnheader">Action</div>
+                </div>
+                {steps.map((row, idx) => (
+                  <div role="row" key={`step-${idx}`} style={{ display: 'grid', gridTemplateColumns: '70px 1fr 86px', gap: 0, padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border)' }}>
+                    <div role="cell" style={{ display: 'flex', alignItems: 'center', color: 'var(--text-muted)' }}>
+                      {idx + 1}
+                    </div>
+                    <div role="cell" style={{ paddingRight: 8 }}>
+                      <textarea
+                        aria-label={`Step ${idx + 1} instruction`}
+                        value={row.instruction}
+                        onChange={(e) => updateStep(idx, e.target.value)}
+                        rows={2}
+                        placeholder="Describe this step..."
+                        style={{
+                          width: '100%',
+                          background: 'var(--bg-soft)',
+                          border: '1px solid var(--border)',
+                          color: 'var(--text)',
+                          borderRadius: 8,
+                          padding: '0.45rem 0.6rem',
+                          resize: 'vertical',
+                        }}
+                      />
+                    </div>
+                    <div role="cell" style={{ display: 'flex', alignItems: 'center' }}>
+                      <button type="button" className="btn" onClick={() => removeStepRow(idx)} disabled={steps.length === 1}>
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop: '0.5rem' }}>
+                <button type="button" className="btn" onClick={addStepRow}>＋ Add step</button>
+              </div>
+            </div>
+
+            {errorMsg ? (
+              <div className="supabase-status" role="alert" style={{ color: '#b91c1c' }}>
+                {errorMsg}
+              </div>
+            ) : null}
+            {message ? (
+              <div className="supabase-status" role="status" style={{ color: '#065f46' }}>
+                {message}
+              </div>
+            ) : null}
+
+            <div style={{ display: 'flex', gap: '0.75rem' }}>
+              <button type="submit" className="btn" disabled={saving}>
+                {saving ? 'Saving…' : 'Save Recipe'}
+              </button>
+              <Link to="/" className="btn secondary" aria-label="Cancel and go back" style={{ display: 'inline-flex', alignItems: 'center', textDecoration: 'none' }}>
+                Cancel
+              </Link>
+            </div>
+          </form>
+        </>
+      ) : null}
     </section>
   );
 }
