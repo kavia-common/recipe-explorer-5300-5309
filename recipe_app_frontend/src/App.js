@@ -10,6 +10,7 @@ import SearchPage from './pages/SearchPage';
 import RecipeDetailsPage from './pages/RecipeDetailsPage';
 import AuthCallback from './pages/AuthCallback';
 import AuthError from './pages/AuthError';
+import AddRecipePage from './pages/AddRecipePage';
 
 /**
  * Root application component setting up the router and base layout.
@@ -47,6 +48,7 @@ function App() {
               <Route path="/recipe/:id" element={<RecipeDetailsPage />} />
               <Route path="/auth/callback" element={<AuthCallback />} />
               <Route path="/auth/error" element={<AuthError />} />
+              <Route path="/add" element={<AddRecipePage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </main>

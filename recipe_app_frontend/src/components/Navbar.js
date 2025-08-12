@@ -52,6 +52,9 @@ export default function Navbar({ onToggleTheme, theme }) {
       </form>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginLeft: '1rem' }}>
+        <Link to="/add" className="btn" aria-label="Add a new recipe" style={{ textDecoration: 'none' }}>
+          ＋ Add Recipe
+        </Link>
         <span className="supabase-status" title={connected ? 'Supabase connected' : 'Supabase not configured'}>
           {connected ? 'Online' : 'Offline'}
         </span>
